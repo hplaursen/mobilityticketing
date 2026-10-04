@@ -1,0 +1,507 @@
+Lecture 4 product identity migration experiment
+Database: compose service postgres, database mobility
+Assumption: freshly seeded Lecture 4 database; do not rerun without reset.
+
+===== database/postgres/experiments/lecture04/baseline.sql =====
+\set ON_ERROR_STOP on
+select current_database();
+ current_database 
+------------------
+ mobility
+(1 row)
+
+select id, product_code, price, currency from tickets order by id;
+    id    | product_code | price | currency 
+----------+--------------+-------+----------
+ TICKET-1 | SINGLE       | 36.00 | DKK
+ TICKET-2 | SINGLE       | 36.00 | DKK
+ TICKET-3 | DAY          | 65.00 | DKK
+(3 rows)
+
+select t.id,t.product_code from tickets t left join products p on p.code=t.product_code
+where t.product_code is null or p.code is null;
+ id | product_code 
+----+--------------
+(0 rows)
+
+do $$ begin
+ if (select count(*) from tickets)<3 or (select count(distinct product_code) from tickets)<2 then
+  raise exception 'Expected at least three tickets covering two products';
+ end if;
+ if exists(select 1 from tickets t left join products p on p.code=t.product_code where p.code is null) then
+  raise exception 'Unresolved product reference';
+ end if;
+end $$;
+DO
+
+===== database/postgres/experiments/lecture04/unsafe_change.sql =====
+-- Demonstrate that an old query no longer compiles after removing its column.
+-- The whole change is rolled back after the expected error is caught.
+begin;
+BEGIN
+alter table tickets drop column product_code;
+ALTER TABLE
+do $$
+begin
+    begin
+        execute 'select product_code from tickets limit 1';
+        raise exception 'Expected the legacy query to fail';
+    exception when undefined_column then
+        raise notice 'Expected failure: old reader refers to removed product_code';
+    end;
+end;
+$$;
+DO
+rollback;
+psql:/work/database/postgres/experiments/lecture04/unsafe_change.sql:14: NOTICE:  Expected failure: old reader refers to removed product_code
+ROLLBACK
+
+===== database/postgres/migrations/030_expand_product_identity.sql =====
+-- Expand: add stable product UUIDs while keeping product_code usable.
+begin;
+BEGIN
+set local lock_timeout = '3s';
+SET
+alter table products
+    add column id uuid default gen_random_uuid();
+ALTER TABLE
+alter table products
+    alter column id set not null,
+    add constraint products_id_unique unique (id);
+ALTER TABLE
+alter table tickets
+    add column product_id uuid;
+ALTER TABLE
+alter table tickets
+    add constraint tickets_product_id_fk
+    foreign key (product_id) references products(id) not valid;
+ALTER TABLE
+-- Prevent accidental reassignment after the UUID has been issued.
+create function prevent_product_id_change()
+returns trigger language plpgsql as $$
+begin
+    if new.id is distinct from old.id then
+        raise exception 'Product ID is immutable';
+    end if;
+    return new;
+end;
+$$;
+CREATE FUNCTION
+create trigger products_id_immutable
+before update of id on products
+for each row execute function prevent_product_id_change();
+CREATE TRIGGER
+commit;
+COMMIT
+
+===== database/postgres/experiments/lecture04/immutable_product_id_probe.sql =====
+-- The generated identifier must not be reassigned after issuance.
+do $$
+begin
+    begin
+        update products set id = gen_random_uuid() where code = 'DAY';
+        raise exception 'Expected product ID update to fail';
+    exception when raise_exception then
+        if sqlerrm = 'Product ID is immutable' then
+            raise notice 'Expected failure: issued product ID cannot be changed';
+        else
+            raise;
+        end if;
+    end;
+end;
+$$;
+psql:/work/database/postgres/experiments/lecture04/immutable_product_id_probe.sql:15: NOTICE:  Expected failure: issued product ID cannot be changed
+DO
+
+===== database/postgres/experiments/lecture04/old_reader.sql =====
+-- Represents an old application version.
+select id, product_code, price, currency
+from tickets
+order by id;
+    id    | product_code | price | currency 
+----------+--------------+-------+----------
+ TICKET-1 | SINGLE       | 36.00 | DKK
+ TICKET-2 | SINGLE       | 36.00 | DKK
+ TICKET-3 | DAY          | 65.00 | DKK
+(3 rows)
+
+
+===== database/postgres/experiments/lecture04/old_writer.sql =====
+-- Represents an old application version; succeeds while product_code exists
+-- and product_id is nullable.
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_code,
+     valid_from_utc, valid_to_utc, price, currency)
+select 'LAB04-OLD-1', user_id, trip_id, 'LAB04-CODE-OLD-1', status,
+       product_code, valid_from_utc, valid_to_utc, price, currency
+from tickets
+where id = 'TICKET-1';
+INSERT 0 1
+
+===== database/postgres/experiments/lecture04/new_reader.sql =====
+-- Transitional reader: use the stable ID when present, otherwise resolve the
+-- legacy code. This also exposes missing or inconsistent assignments.
+select t.id, t.product_code, t.product_id,
+       coalesce(by_id.id, by_code.id) as resolved_product_id,
+       coalesce(by_id.code, by_code.code) as resolved_product_code,
+       t.price, t.currency
+from tickets t
+left join products by_id on by_id.id = t.product_id
+left join products by_code on by_code.code = t.product_code
+order by t.id;
+     id      | product_code | product_id |         resolved_product_id          | resolved_product_code | price | currency 
+-------------+--------------+------------+--------------------------------------+-----------------------+-------+----------
+ LAB04-OLD-1 | SINGLE       |            | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE                | 36.00 | DKK
+ TICKET-1    | SINGLE       |            | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE                | 36.00 | DKK
+ TICKET-2    | SINGLE       |            | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE                | 36.00 | DKK
+ TICKET-3    | DAY          |            | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY                   | 65.00 | DKK
+(4 rows)
+
+
+===== database/postgres/experiments/lecture04/require_before_backfill.sql =====
+-- Expected-failure rehearsal while at least one ticket has product_id NULL.
+do $$
+begin
+    begin
+        execute 'alter table tickets alter column product_id set not null';
+        raise exception 'Expected SET NOT NULL to fail before backfill';
+    exception when not_null_violation then
+        raise notice 'Expected failure: product_id still contains NULL values';
+    end;
+end;
+$$;
+psql:/work/database/postgres/experiments/lecture04/require_before_backfill.sql:11: NOTICE:  Expected failure: product_id still contains NULL values
+DO
+
+===== database/postgres/migrations/031_backfill_ticket_product.sql =====
+-- Repeatable backfill: never overwrite a product ID already assigned.
+update tickets t
+set product_id = p.id
+from products p
+where t.product_id is null
+  and p.code = t.product_code;
+UPDATE 4
+
+===== database/postgres/migrations/031_backfill_ticket_product.sql =====
+-- Repeatable backfill: never overwrite a product ID already assigned.
+update tickets t
+set product_id = p.id
+from products p
+where t.product_id is null
+  and p.code = t.product_code;
+UPDATE 0
+
+===== database/postgres/experiments/lecture04/verify.sql =====
+-- Show ticket identity and historical price, including any bad references.
+select t.id, t.product_code, t.product_id,
+       p_by_code.id as code_product_id,
+       p_by_id.code as id_product_code,
+       t.price, t.currency
+from tickets t
+left join products p_by_code on p_by_code.code = t.product_code
+left join products p_by_id on p_by_id.id = t.product_id
+order by t.id;
+     id      | product_code |              product_id              |           code_product_id            | id_product_code | price | currency 
+-------------+--------------+--------------------------------------+--------------------------------------+-----------------+-------+----------
+ LAB04-OLD-1 | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-1    | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-2    | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-3    | DAY          | 37d52661-85e5-4636-b35e-5f1380701ea6 | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY             | 65.00 | DKK
+(4 rows)
+
+-- Expected: zero rows once the backfill and dual-write are correct.
+select t.id
+from tickets t
+left join products p_by_code on p_by_code.code = t.product_code
+left join products p_by_id on p_by_id.id = t.product_id
+where t.product_id is null
+   or p_by_id.id is null
+   or p_by_code.id is distinct from p_by_id.id;
+ id 
+----
+(0 rows)
+
+-- Historical TICKET-3 must remain 65 DKK; DAY currently costs 80 DKK.
+select t.id, t.price as paid_price, p.price as current_catalogue_price,
+       t.currency, p.currency as catalogue_currency
+from tickets t join products p on p.code = t.product_code
+where t.id = 'TICKET-3';
+    id    | paid_price | current_catalogue_price | currency | catalogue_currency 
+----------+------------+-------------------------+----------+--------------------
+ TICKET-3 |      65.00 |                   80.00 | DKK      | DKK
+(1 row)
+
+
+===== database/postgres/experiments/lecture04/late_old_writer.sql =====
+-- Simulate an older application instance writing during the backfill window.
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_code,
+     valid_from_utc, valid_to_utc, price, currency)
+select 'LAB04-OLD-LATE', user_id, trip_id, 'LAB04-CODE-OLD-LATE', status,
+       product_code, valid_from_utc, valid_to_utc, price, currency
+from tickets
+where id = 'TICKET-1';
+INSERT 0 1
+
+===== database/postgres/migrations/031_backfill_ticket_product.sql =====
+-- Repeatable backfill: never overwrite a product ID already assigned.
+update tickets t
+set product_id = p.id
+from products p
+where t.product_id is null
+  and p.code = t.product_code;
+UPDATE 1
+
+===== database/postgres/experiments/lecture04/verify.sql =====
+-- Show ticket identity and historical price, including any bad references.
+select t.id, t.product_code, t.product_id,
+       p_by_code.id as code_product_id,
+       p_by_id.code as id_product_code,
+       t.price, t.currency
+from tickets t
+left join products p_by_code on p_by_code.code = t.product_code
+left join products p_by_id on p_by_id.id = t.product_id
+order by t.id;
+       id       | product_code |              product_id              |           code_product_id            | id_product_code | price | currency 
+----------------+--------------+--------------------------------------+--------------------------------------+-----------------+-------+----------
+ LAB04-OLD-1    | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ LAB04-OLD-LATE | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-1       | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-2       | SINGLE       | 46721e3a-e95c-4278-be47-513dcb039d27 | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE          | 36.00 | DKK
+ TICKET-3       | DAY          | 37d52661-85e5-4636-b35e-5f1380701ea6 | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY             | 65.00 | DKK
+(5 rows)
+
+-- Expected: zero rows once the backfill and dual-write are correct.
+select t.id
+from tickets t
+left join products p_by_code on p_by_code.code = t.product_code
+left join products p_by_id on p_by_id.id = t.product_id
+where t.product_id is null
+   or p_by_id.id is null
+   or p_by_code.id is distinct from p_by_id.id;
+ id 
+----
+(0 rows)
+
+-- Historical TICKET-3 must remain 65 DKK; DAY currently costs 80 DKK.
+select t.id, t.price as paid_price, p.price as current_catalogue_price,
+       t.currency, p.currency as catalogue_currency
+from tickets t join products p on p.code = t.product_code
+where t.id = 'TICKET-3';
+    id    | paid_price | current_catalogue_price | currency | catalogue_currency 
+----------+------------+-------------------------+----------+--------------------
+ TICKET-3 |      65.00 |                   80.00 | DKK      | DKK
+(1 row)
+
+
+===== database/postgres/experiments/lecture04/mismatch_probe.sql =====
+-- Show whether the transitional schema itself rejects conflicting references.
+begin;
+BEGIN
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_code, product_id,
+     valid_from_utc, valid_to_utc, price, currency)
+select 'LAB04-MISMATCH', t.user_id, t.trip_id, 'LAB04-CODE-MISMATCH',
+       'Active', single_product.code, day_product.id,
+       t.valid_from_utc, t.valid_to_utc, t.price, t.currency
+from tickets t
+cross join products single_product
+cross join products day_product
+where t.id = 'TICKET-1'
+  and single_product.code = 'SINGLE'
+  and day_product.code = 'DAY';
+INSERT 0 1
+do $$
+begin
+    if exists (select 1 from tickets where id = 'LAB04-MISMATCH') then
+        raise notice 'Database accepted the mismatched pair; writers and verification must prevent it';
+    end if;
+end;
+$$;
+DO
+rollback;
+psql:/work/database/postgres/experiments/lecture04/mismatch_probe.sql:22: NOTICE:  Database accepted the mismatched pair; writers and verification must prevent it
+ROLLBACK
+
+===== database/postgres/experiments/lecture04/new_writer.sql =====
+-- New writer accepts a product ID, derives its code, and keeps the agreed
+-- purchase price as an independent input (not the current catalogue price).
+\set ticket_id 'LAB04-NEW-1'
+\set ticket_code 'LAB04-CODE-NEW-1'
+select id as product_id from products where code = 'DAY' \gset
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_code, product_id,
+     valid_from_utc, valid_to_utc, price, currency)
+select :'ticket_id', source.user_id, source.trip_id, :'ticket_code',
+       'Active', p.code, p.id,
+       source.valid_from_utc, source.valid_to_utc, 65.00, 'DKK'
+from tickets source
+join products p on p.id = :'product_id'::uuid
+where source.id = 'TICKET-1';
+INSERT 0 1
+-- A caller supplies SINGLE with the DAY product ID. The writer ignores the
+-- conflicting supplied code and stores the code looked up from the ID.
+with request(supplied_code, product_id) as (
+    values ('SINGLE'::text, :'product_id'::uuid)
+)
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_code, product_id,
+     valid_from_utc, valid_to_utc, price, currency)
+select 'LAB04-NEW-CONFLICT', source.user_id, source.trip_id,
+       'LAB04-CODE-NEW-CONFLICT', 'Active',
+       case when request.supplied_code is distinct from p.code
+            then p.code else request.supplied_code end,
+       p.id, source.valid_from_utc, source.valid_to_utc, 65.00, 'DKK'
+from request
+join products p on p.id = request.product_id
+join tickets source on source.id = 'TICKET-1';
+INSERT 0 1
+-- Unknown IDs are rejected explicitly.
+do $$
+declare inserted_rows integer;
+begin
+    insert into tickets
+        (id, user_id, trip_id, ticket_code, status, product_code, product_id,
+         valid_from_utc, valid_to_utc, price, currency)
+    select 'LAB04-UNKNOWN-PRODUCT', source.user_id, source.trip_id,
+           'LAB04-CODE-UNKNOWN-PRODUCT', 'Active', p.code, p.id,
+           source.valid_from_utc, source.valid_to_utc, 65.00, 'DKK'
+    from tickets source
+    join products p on p.id = '00000000-0000-0000-0000-000000000000'::uuid
+    where source.id = 'TICKET-1';
+    get diagnostics inserted_rows = row_count;
+    if inserted_rows = 0 then
+        raise notice 'Unknown product ID rejected';
+    else
+        raise exception 'Unknown product ID unexpectedly inserted a ticket';
+    end if;
+end;
+$$;
+DO
+psql:/work/database/postgres/experiments/lecture04/new_writer.sql:54: NOTICE:  Unknown product ID rejected
+
+===== database/postgres/migrations/032_require_ticket_product.sql =====
+-- Contract stage: run only after old-only writers have been retired.
+begin;
+BEGIN
+set local lock_timeout = '3s';
+SET
+alter table tickets validate constraint tickets_product_id_fk;
+ALTER TABLE
+alter table tickets
+    add constraint tickets_product_id_present
+    check (product_id is not null) not valid;
+ALTER TABLE
+alter table tickets validate constraint tickets_product_id_present;
+ALTER TABLE
+alter table tickets alter column product_id set not null;
+ALTER TABLE
+alter table tickets drop constraint tickets_product_id_present;
+ALTER TABLE
+commit;
+COMMIT
+
+===== database/postgres/experiments/lecture04/old_writer_after_require.sql =====
+-- Expected-failure probe after product_id is NOT NULL.
+do $$
+begin
+    begin
+        execute $sql$
+            insert into tickets
+                (id, user_id, trip_id, ticket_code, status, product_code,
+                 valid_from_utc, valid_to_utc, price, currency)
+            select 'LAB04-OLD-AFTER-REQUIRE', user_id, trip_id,
+                   'LAB04-CODE-OLD-AFTER-REQUIRE', status, product_code,
+                   valid_from_utc, valid_to_utc, price, currency
+            from tickets where id = 'TICKET-1'
+        $sql$;
+        raise exception 'Expected old writer to fail after product_id became required';
+    exception when not_null_violation then
+        raise notice 'Expected failure: old writer omits required product_id';
+    end;
+end;
+$$;
+psql:/work/database/postgres/experiments/lecture04/old_writer_after_require.sql:19: NOTICE:  Expected failure: old writer omits required product_id
+DO
+
+===== database/postgres/experiments/lecture04/remove_legacy.sql =====
+-- Reversible rehearsal: inspect dependencies, remove the old column in a
+-- transaction, prove the ID-only reader/writer work, and roll back.
+\set ON_ERROR_STOP on
+select dependent_ns.nspname as schema_name, dependent_view.relname as object_name,
+       dependent_view.relkind
+from pg_depend d
+join pg_rewrite rw on rw.oid = d.objid
+join pg_class dependent_view on dependent_view.oid = rw.ev_class
+join pg_namespace dependent_ns on dependent_ns.oid = dependent_view.relnamespace
+join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid
+where d.refobjid = 'tickets'::regclass and a.attname = 'product_code';
+ schema_name | object_name | relkind 
+-------------+-------------+---------
+(0 rows)
+
+select proname from pg_proc
+where prosrc ilike '%product_code%';
+ proname 
+---------
+(0 rows)
+
+begin;
+BEGIN
+set local lock_timeout = '3s';
+SET
+alter table tickets drop column product_code;
+ALTER TABLE
+do $$
+begin
+    begin
+        execute $sql$
+            insert into tickets
+                (id, user_id, trip_id, ticket_code, status, product_code,
+                 valid_from_utc, valid_to_utc, price, currency)
+            select 'LAB04-OLD-AFTER-DROP', user_id, trip_id,
+                   'LAB04-CODE-OLD-AFTER-DROP', status, product_code,
+                   valid_from_utc, valid_to_utc, price, currency
+            from tickets where id = 'TICKET-1'
+        $sql$;
+        raise exception 'Expected old writer to fail after product_code removal';
+    exception when undefined_column then
+        raise notice 'Expected failure: old writer refers to removed product_code';
+    end;
+end;
+$$;
+DO
+\ir final_reader.sql
+psql:/work/database/postgres/experiments/lecture04/remove_legacy.sql:37: NOTICE:  Expected failure: old writer refers to removed product_code
+-- ID-only reader; safe after tickets.product_code is removed.
+select t.id, p.id as product_id, p.code as product_code,
+       t.price, t.currency
+from tickets t
+join products p on p.id = t.product_id
+order by t.id;
+         id         |              product_id              | product_code | price | currency 
+--------------------+--------------------------------------+--------------+-------+----------
+ LAB04-NEW-1        | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY          | 65.00 | DKK
+ LAB04-NEW-CONFLICT | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY          | 65.00 | DKK
+ LAB04-OLD-1        | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE       | 36.00 | DKK
+ LAB04-OLD-LATE     | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE       | 36.00 | DKK
+ TICKET-1           | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE       | 36.00 | DKK
+ TICKET-2           | 46721e3a-e95c-4278-be47-513dcb039d27 | SINGLE       | 36.00 | DKK
+ TICKET-3           | 37d52661-85e5-4636-b35e-5f1380701ea6 | DAY          | 65.00 | DKK
+(7 rows)
+
+\ir final_writer.sql
+-- ID-only writer; safe after tickets.product_code is removed.
+select id as product_id from products where code = 'DAY' \gset
+insert into tickets
+    (id, user_id, trip_id, ticket_code, status, product_id,
+     valid_from_utc, valid_to_utc, price, currency)
+select 'LAB04-FINAL-1', source.user_id, source.trip_id,
+       'LAB04-CODE-FINAL-1', 'Active', p.id,
+       source.valid_from_utc, source.valid_to_utc, 65.00, 'DKK'
+from tickets source
+join products p on p.id = :'product_id'::uuid
+where source.id = 'TICKET-1';
+INSERT 0 1
+rollback;
+ROLLBACK
