@@ -6,6 +6,6 @@ services:
       POSTGRES_USER: mobility
       POSTGRES_PASSWORD: mobility
     ports:
-      - "5432:5432"
+      - "54321:5432"
     volumes:
       - ./database/postgres:/docker-entrypoint-initdb.d:ro

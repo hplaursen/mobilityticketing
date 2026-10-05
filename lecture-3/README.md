@@ -57,7 +57,7 @@ Run the same command for `021_daily_revenue_trigger.sql` and then `022_daily_cap
 - `database/postgres/migrations/`: completed function, trigger-summary, and materialized-view definitions.
 - `database/postgres/queries/`: reference and comparison queries.
 - `database/postgres/experiments/`: test cases for inserts, corrections, deletes, and duplicate delivery.
-- `docs/`: lab brief, Moodle answers, full lab answers, and recorded output.
+- `docs/`: lab brief and recorded output. Answers are at the end of `docs/lab.md`.
 
 ## Scope boundary
 

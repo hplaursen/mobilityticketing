@@ -57,3 +57,51 @@ Keep your SQL, commands and important results in `docs/evidence/lecture04/README
 Add a small table showing which inserts and queries work before expansion, after expansion, once the ID is required, and after the old column is removed. Note any query that runs but misses tickets.
 
 Finish with your rollout decision: when would you stop the old writers, and could you still return to the old application version? Support your answer with a result from your tests.
+
+## Answers to the Lecture 4 tasks
+
+### 1. Try removing the old reference
+
+[`unsafe_change.sql`](../database/postgres/experiments/lecture04/unsafe_change.sql) shows that dropping `tickets.product_code` breaks the old query. Without a replacement reference, tickets lose their product link. The change is rolled back.
+
+### 2. Complete the expand migration
+
+[`030_expand_product_identity.sql`](../database/postgres/migrations/030_expand_product_identity.sql) assigns each product a UUID and adds a nullable `tickets.product_id` with a foreign key. It keeps `product_code` for old application versions. The lock timeout is three seconds. For a large table, plan for locks, possible table rewrites, and a backfill in batches.
+
+### 3. Check the old application still works
+
+The old reader and writer in [`old_reader.sql`](../database/postgres/experiments/lecture04/old_reader.sql) and [`old_writer.sql`](../database/postgres/experiments/lecture04/old_writer.sql) use `product_code` only. Both work while `product_id` is nullable.
+
+### 4. Write using a product ID
+
+[`new_writer.sql`](../database/postgres/experiments/lecture04/new_writer.sql) looks up the code from the supplied ID and writes both references. If the supplied code conflicts, it uses the looked-up code. It keeps the agreed ticket price; it does not replace it with today's catalogue price.
+
+### 5. Read by ID, with a code fallback
+
+[`new_reader.sql`](../database/postgres/experiments/lecture04/new_reader.sql) looks up the product by ID and falls back to its code when the ID is null. This lets it read tickets before backfill.
+
+### 6. Backfill ticket product IDs
+
+[`031_backfill_ticket_product.sql`](../database/postgres/migrations/031_backfill_ticket_product.sql) updates only null IDs. Run it twice: the second run changes zero rows. Run the old writer and backfill again to fill the new ticket without changing existing IDs.
+
+### 7. Check references and preserve ticket details
+
+[`verify.sql`](../database/postgres/experiments/lecture04/verify.sql) checks for null IDs, missing products, and mismatched code/ID pairs. `TICKET-3` stays at 65 DKK even though DAY now costs 80 DKK. [`mismatch_probe.sql`](../database/postgres/experiments/lecture04/mismatch_probe.sql) shows that direct SQL can create a mismatch while both references exist. The transitional writer avoids that mismatch, but the database does not enforce it. Product IDs are protected from changes, as tested in [`immutable_product_id_probe.sql`](../database/postgres/experiments/lecture04/immutable_product_id_probe.sql).
+
+### 8. Require the new reference
+
+[`require_before_backfill.sql`](../database/postgres/experiments/lecture04/require_before_backfill.sql) shows that `NOT NULL` fails while a ticket has no product ID. After backfill, [`032_require_ticket_product.sql`](../database/postgres/migrations/032_require_ticket_product.sql) validates the foreign key and requires the ID. The old writer then fails because it does not provide one.
+
+### 9. Remove the old ticket reference
+
+[`remove_legacy.sql`](../database/postgres/experiments/lecture04/remove_legacy.sql) checks dependencies and tries dropping `tickets.product_code` without `CASCADE`. The ID-only reader and writer work in the rehearsal. The transaction is rolled back. `products.code` remains the catalogue label.
+
+### Before requiring the new reference
+
+Stop old writers first. Backfill the tickets and check that every ticket has the right product ID before making it required. Before removing `product_code`, switch readers and writers to IDs and check what still uses the old column. After it is removed, the old application will need changes before it can work again.
+
+### Rollout decision
+
+Keep both references while old and new application versions run together. Require `product_id` only after old writers stop and all tickets pass the checks. Remove `tickets.product_code` later, after everything uses IDs. To use the old application again, the database would need to support `product_code` again.
+
+The [Lecture 4 evidence](evidence/lecture04/README.md) shows the test results.

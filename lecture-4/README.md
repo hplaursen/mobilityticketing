@@ -17,7 +17,7 @@ Read [the lab](docs/lab.md) for the tasks and commands. You will find:
 - migration examples and completed migrations in `database/postgres/migrations/`;
 - queries, inserts and experiments in `database/postgres/experiments/lecture04/`.
 
-The completed student versions use `.sql` filenames alongside the unchanged `.sql.example` starters. See [Moodle answers](docs/moodle-answers.md), [full lab answers](docs/lab-answers.md), and [run evidence](docs/evidence/lecture04/README.md).
+The completed student versions use `.sql` filenames alongside the unchanged `.sql.example` starters. See the [answers at the end of the lab](docs/lab.md#answers-to-the-lecture-4-tasks) and the [run evidence](docs/evidence/lecture04/README.md).
 
 To run the complete experiment from a freshly reset database, use `bash scripts/run_experiment.sh`. It records the commands' output in `docs/evidence/lecture04/run-output.txt`. Reset first with the `down -v` instructions below; the script is intentionally not idempotent.
 

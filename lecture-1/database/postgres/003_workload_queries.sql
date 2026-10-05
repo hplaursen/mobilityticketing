@@ -1,4 +1,4 @@
--- 1. Show the next 20 scheduled trips for a route after a supplied timestamp.
+-- 1. Show up to the next 20 scheduled trips for a route after a supplied timestamp.
 select
     t.id,
     t.scheduled_departure_utc,

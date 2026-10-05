@@ -44,45 +44,53 @@ Do not add MongoDB, Redis, caching, event queues, payment logic, validation logi
 - [ ] State what the implementation proves and what remains unknown.
 - [ ] Commit the implementation under `database/postgres/`.
 
-## Student submission: model and assumption
 
-The ER diagram for the Lecture 1 implementation is in [`database/postgres/er-diagram.md`](../database/postgres/er-diagram.md). It models the five implemented tables and their identifiers, relationships, and cardinalities.
 
-**Assumption:** A route may visit the same stop more than once. Each visit is a distinct route position, identified by its `stop_sequence`; therefore, `route_stops` uses `(route_id, stop_sequence)` as its primary key instead of `(route_id, stop_id)`. This supports loop routes where the same stop can occur at multiple points in the route.
+## Answers to the Lecture 1 tasks
 
-## System context
+### ER diagram
 
-MobilityTicketing brings bus, tram, and train information together in one city transport platform. Customers use it to search for journeys, see departures, and check delays. Transport operators maintain routes and timetables. The Lecture 1 database covers the small relational part needed for operators, routes, stops, route positions, and trips. It does not yet implement ticket sales or live availability.
+ER diagram can be found here: [`er-diagram.md`](../database/postgres/er-diagram.md). It shows the tables, identifiers, relationships, and cardinalities.
 
-## Workload map
+### Modelling assumption
+
+A route can visit the same stop more than once. Each visit has its own `stop_sequence`, so `route_stops` uses `(route_id, stop_sequence)` as its primary key. This supports loop routes.
+
+### System context
+
+MobilityTicketing brings bus, tram, and train information together. Customers search for journeys, check departures, and see delays. Operators maintain routes and timetables. Lecture 1 covers operators, routes, stops, route positions, and trips. Ticket sales and live availability are not included yet.
+
+### Access-pattern map
 
 | Workload | Main data used | What matters most |
 |---|---|---|
-| Journey search | Routes, stops, route positions, trips | Fast reads; slightly old information can be acceptable. |
-| Ticket purchase | Trips, products, capacity, tickets, payments | Correct price and availability; avoid selling beyond capacity. |
-| Ticket validation | Tickets and validations | Find and check a ticket quickly while passengers board. |
-| Timetable maintenance | Routes and trips | Operators can change schedules; searches should see updates. |
-| Real-time availability | Trips and remaining capacity | Search can use a recent estimate; purchase needs a trustworthy check. |
-| Reporting | Tickets, payments, validations | Historical results should be correct; a small delay is acceptable. |
+| Journey search | Routes, stops, route positions, trips | Fast reads; slightly old data is okay. |
+| Ticket purchase | Trips, products, capacity, tickets, payments | Correct price and availability. Do not oversell. |
+| Ticket validation | Tickets and validations | Quick ticket checks when passengers board. |
+| Timetable maintenance | Routes and trips | Operators can update schedules. Searches should show updates. |
+| Real-time availability | Trips and remaining capacity | Search can use an estimate. Purchase needs a reliable check. |
+| Reporting | Tickets, payments, validations | Correct history; a small delay is okay. |
 
-Lecture 1 implements route and timetable data only. The other workloads are included to show what the larger system may need later.
+Lecture 1 only implements route and timetable data. The other workloads may be added later.
 
-## Functional dependency
+### Functional dependency
 
-In `route_stops`, `(route_id, stop_sequence)` determines `stop_id`: for a given route position, there is one stop. The sequence is part of the key because a route can visit the same stop more than once. Using only `(route_id, stop_id)` would incorrectly prevent that.
+In `route_stops`, `(route_id, stop_sequence)` determines `stop_id`. Each route position has one stop. The sequence is part of the key because a route can visit the same stop more than once.
 
-Stop names and city IDs are stored once in `stops`, rather than repeated for every route position. This avoids having to update the same stop details in several rows if its name changes.
+Stop names and city IDs are stored once in `stops`. This avoids repeating and updating the same stop details in several rows.
 
-## Compare the diagram with the implementation
+### Comparing implemented schema with ER diagram
 
-The diagram matches the five tables and their primary and foreign keys in `database/postgres/001_relational_baseline.sql`. The `route_stops` key is `(route_id, stop_sequence)`, as shown in both. One detail is that the database does not require every route to have a stop yet; the diagram therefore allows a route to have zero or more route-stop rows. The seed data gives the M2 and 5C routes stop rows, while 8B currently has none.
+The diagram matches the five tables and their keys in `database/postgres/001_relational_baseline.sql`. Both use `(route_id, stop_sequence)` for `route_stops`. A route can have no stops yet. In the seed data, M2 and 5C have stops; 8B does not.
 
-This implementation proves that stored trips belong to routes and that each stored route position points to a route and a stop. It does not yet model ticket purchases, live capacity, or whether a timetable is operationally valid.
+### What the implementation proves and what remains unknown
 
-## Representative query results
+This implementation shows that trips belong to routes and route positions point to routes and stops. It does not cover ticket purchases, live capacity, or timetable validity.
 
-The following are expected results from the current seed data and the queries in [`database/postgres/003_workload_queries.sql`](../database/postgres/003_workload_queries.sql). They have not been recorded from a database run.
+### Representative results for the three workload queries
 
-1. For route `LINE-5C` after `2024-06-01 00:00:00+00`, the query should return its two seeded trips: `TRIP-5C-2024-06-01-09:00` and `TRIP-5C-2024-06-01-09:15`.
-2. The ordered stops for `LINE-5C` should be Copenhagen Central Station, Kongens Nytorv, then Nørreport.
-3. For service date `2024-06-01`, the scheduled trip counts should be M2: 2, 5C: 2, and 8B: 0. Route 8B should still appear because the query uses a left join and keeps the date and status filters in its `ON` clause.
+Verified by running [`database/postgres/003_workload_queries.sql`](../database/postgres/003_workload_queries.sql) against the Lecture 1 database.
+
+1. `LINE-5C` returned two trips: `TRIP-5C-2024-06-01-09:00` at 07:00 UTC and `TRIP-5C-2024-06-01-09:15` at 07:15 UTC.
+2. `LINE-5C` stops, in order: Copenhagen Central Station, Kongens Nytorv, Nørreport.
+3. On `2024-06-01`, trip counts were M2: 2, 5C: 2, and 8B: 0. Route 8B was included even though it had no trips.

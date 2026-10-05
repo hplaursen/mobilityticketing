@@ -1,7 +1,5 @@
--- Stored snapshot of captured revenue. It changes only when refreshed.
+-- Stored captured revenue. Changes only when refreshed.
 
--- The starter initializes an empty view with this name. Recreate it here so
--- this migration both works with the starter and gives a populated snapshot.
 drop materialized view if exists daily_captured_revenue;
 
 create materialized view daily_captured_revenue as

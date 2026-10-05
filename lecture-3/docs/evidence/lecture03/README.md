@@ -1,8 +1,8 @@
 # Lecture 3 reporting experiment evidence
 
-The results below were collected from the Lecture 3 PostgreSQL seed data after applying migrations `020`, `021`, and `022`. Revenue date is calculated in UTC. Each result is `DKK amount / captured payment count` for `OP-METRO` on `2026-04-29`.
+These starting figures come from the sample data, before the tests. Amounts are in DKK, dates use UTC, and the count includes only captured payments.
 
-The reference query returned:
+Before the tests, captured payments totalled:
 
 | Operator | Date | Amount | Captured payments |
 | --- | --- | ---: | ---: |
@@ -23,13 +23,6 @@ The reference query returned:
 | Refresh the materialized view | 72 / 2 | 72 / 2 | 72 / 2 | 108 / 3 |
 | Rebuild the trigger summary | 72 / 2 | 72 / 2 | 72 / 2 | 72 / 2 |
 
-The materialized view matched the direct query after refresh. The trigger summary matched after a rebuild. After removing the duplicate test row and adding a unique constraint on `payments.external_payment_reference`, all four approaches returned 36 / 1. A repeated gateway reference was then rejected with SQLSTATE `23505`.
+After refreshing, the materialized view showed the current result. After rebuilding, the trigger summary showed it too. The database also rejected a second payment with the same gateway reference.
 
-## Commands and files used
-
-- Reference query: [`base_revenue.sql`](../../../database/postgres/queries/base_revenue.sql)
-- Four-way comparison query: [`compare_daily_revenue.sql`](../../../database/postgres/queries/compare_daily_revenue.sql)
-- Six test cases with a comparison after each: [`reporting_cases.sql`](../../../database/postgres/experiments/reporting_cases.sql)
-- Duplicate-reference guard check: [`payment_reference_guard.sql`](../../../database/postgres/experiments/payment_reference_guard.sql)
-
-The valid comparison script completed every case. Refreshing changed the materialized view from its old snapshot to the current base-table result. Rebuilding changed the trigger summary from 108 / 3 to 72 / 2. The duplicate guard cleanup and constraint succeeded, and the repeated-reference assertion reported SQLSTATE `23505` as expected.
+The six test cases were run using [`reporting_cases.sql`](../../../database/postgres/experiments/reporting_cases.sql).

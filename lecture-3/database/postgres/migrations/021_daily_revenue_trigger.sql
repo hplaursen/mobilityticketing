@@ -9,7 +9,7 @@ create table if not exists daily_revenue_by_operator (
     primary key (operator_id, revenue_date)
 );
 
--- Replace the starter's empty summary with one built from source payments.
+-- Clear the summary table, then fill it again using the payment records.
 truncate table daily_revenue_by_operator;
 
 create or replace function add_inserted_payment_to_daily_revenue()
@@ -53,7 +53,7 @@ after insert on payments
 for each row
 execute function add_inserted_payment_to_daily_revenue();
 
--- The trigger does not fire for existing seed rows, so initialize the summary.
+-- The trigger only handles new payments, so add the existing payments to the summary here.
 insert into daily_revenue_by_operator (
     operator_id, revenue_date, captured_amount, captured_payments
 )
@@ -69,8 +69,8 @@ join routes r on r.id = tr.route_id
 where p.status = 'Captured'
 group by r.operator_id, (p.created_utc at time zone 'UTC')::date;
 
--- Recovery helper for corrections and deletes. Run without concurrent payment
--- writes in this lab; production use needs a concurrency-safe rebuild strategy.
+-- Use this function to update the summary after payments are changed or deleted.
+-- During this exercise, do not add payments while the summary is being rebuilt.
 create or replace function rebuild_daily_revenue_for(
     requested_operator_id text,
     requested_date date

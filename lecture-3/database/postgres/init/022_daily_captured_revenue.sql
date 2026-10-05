@@ -15,5 +15,3 @@ with no data;
 create unique index daily_captured_revenue_key
     on daily_captured_revenue (operator_id, revenue_date);
 
--- Run explicitly when the source data should become visible:
--- refresh materialized view daily_captured_revenue;
